@@ -38,6 +38,8 @@ const pendingKey = (email) => `otp:register:${email}`;
 const cooldownKey = (email) => `otp:resend:${email}`;
 const totpChallengeKey = (id) => `totp:login:${id}`;
 const totpEnrollKey = (userId) => `totp:enroll:${userId}`;
+const resetPendingKey = (email) => `otp:reset:${email}`;
+const resetCooldownKey = (email) => `otp:reset-cd:${email}`;
 
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -49,8 +51,8 @@ function fail(res, status, error, message, extra = {}) {
 
 /**
  * Mints the session: refresh cookie (httpOnly, rotated) + short-lived access
- * token for memory. TOTP is mandatory, so the response always tells the
- * client whether enrollment is still owed.
+ * token for memory. TOTP is optional — users opt in from Settings — so
+ * enrollment is never owed; the field is kept for response-shape stability.
  */
 async function issueTokens(res, user, status = 200) {
   const { sid, cookieValue } = await createSession(user._id);
@@ -60,7 +62,7 @@ async function issueTokens(res, user, status = 200) {
     token,
     expires_in: ACCESS_TTL_SECONDS,
     user: user.toSafeJSON(),
-    totp_enrollment_required: !user.totpEnabled,
+    totp_enrollment_required: false,
   });
 }
 
@@ -374,7 +376,7 @@ async function refresh(req, res) {
     token,
     expires_in: ACCESS_TTL_SECONDS,
     user: user.toSafeJSON(),
-    totp_enrollment_required: !user.totpEnabled,
+    totp_enrollment_required: false,
   });
 }
 
@@ -415,7 +417,180 @@ async function reauth(req, res) {
 async function me(req, res) {
   const user = await User.findById(req.userId);
   if (!user) return fail(res, 404, "not_found", "User not found.");
-  res.json({ user: user.toSafeJSON(), totp_enrollment_required: !user.totpEnabled });
+  res.json({ user: user.toSafeJSON(), totp_enrollment_required: false });
+}
+
+/* ------------------------------------------------------------------ */
+/* Account settings (name, password)                                  */
+/* ------------------------------------------------------------------ */
+
+/** Changes the display name. Low-risk, so no step-up is required. */
+async function updateProfile(req, res) {
+  const trimmed = String(req.body?.name || "").trim();
+  if (!trimmed) {
+    return fail(res, 400, "validation_error", "Name is required.");
+  }
+  if (trimmed.length > 80) {
+    return fail(res, 400, "validation_error", "Name must be 80 characters or fewer.");
+  }
+
+  const user = await User.findById(req.userId);
+  if (!user) return fail(res, 404, "not_found", "User not found.");
+  user.name = trimmed;
+  await user.save();
+  res.json({ user: user.toSafeJSON() });
+}
+
+/**
+ * Changes the password. The current password is proved inline (rather than via
+ * the step-up modal) so the user isn't asked for their password twice.
+ */
+async function changePassword(req, res) {
+  const { currentPassword, newPassword } = req.body || {};
+  if (!currentPassword || !newPassword) {
+    return fail(res, 400, "validation_error", "Current and new password are required.");
+  }
+  if (newPassword.length < 6) {
+    return fail(res, 400, "validation_error", "New password must be at least 6 characters.");
+  }
+
+  const user = await User.findById(req.userId);
+  if (!user || !(await user.verifyPassword(currentPassword))) {
+    return fail(res, 401, "invalid_credentials", "Current password is incorrect.");
+  }
+
+  await user.setPassword(newPassword);
+  await user.save();
+  res.json({ ok: true });
+}
+
+/* ------------------------------------------------------------------ */
+/* Password reset (email OTP, unauthenticated)                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Step 1 of reset: emails a code to the account. Enumeration-resistant — the
+ * response is identical whether or not the email maps to an account, and a
+ * resend cooldown keeps it from being used to spam an inbox.
+ */
+async function requestPasswordReset(req, res) {
+  const { email } = req.body || {};
+  if (!email || !isValidEmail(email)) {
+    return fail(res, 400, "validation_error", "Please provide a valid email address.");
+  }
+  const normalizedEmail = email.toLowerCase().trim();
+
+  const generic = () =>
+    res.json({
+      pending: true,
+      email: normalizedEmail,
+      message: "If an account exists for that email, we've sent a reset code.",
+    });
+
+  const user = await User.findOne({ email: normalizedEmail });
+  if (!user) return generic();
+
+  const redis = await getRedis();
+  const wait = await redis.ttl(resetCooldownKey(normalizedEmail));
+  if (wait > 0) return generic();
+
+  const otp = generateOtp();
+  const pending = {
+    userId: user._id.toString(),
+    otpHash: hashOtp(normalizedEmail, otp),
+    attempts: 0,
+  };
+  await redis.set(resetPendingKey(normalizedEmail), JSON.stringify(pending), {
+    EX: OTP_TTL_SECONDS,
+  });
+  await redis.set(resetCooldownKey(normalizedEmail), "1", {
+    EX: OTP_RESEND_COOLDOWN_SECONDS,
+  });
+
+  await sendOtpEmail(normalizedEmail, otp, "reset");
+  return generic();
+}
+
+/** Step 2 of reset: a correct code sets the new password. */
+async function resetPassword(req, res) {
+  const { email, otp, newPassword } = req.body || {};
+  if (!email || !otp || !newPassword) {
+    return fail(res, 400, "validation_error", "Email, code and new password are required.");
+  }
+  if (newPassword.length < 6) {
+    return fail(res, 400, "validation_error", "New password must be at least 6 characters.");
+  }
+
+  const normalizedEmail = email.toLowerCase().trim();
+  const redis = await getRedis();
+  const key = resetPendingKey(normalizedEmail);
+  const raw = await redis.get(key);
+  if (!raw) {
+    return fail(res, 400, "otp_expired", "Reset code expired. Please request a new one.");
+  }
+
+  const pending = JSON.parse(raw);
+  if (!verifyOtpHash(normalizedEmail, String(otp).trim(), pending.otpHash)) {
+    pending.attempts += 1;
+    if (pending.attempts >= OTP_MAX_ATTEMPTS) {
+      await redis.del(key);
+      return fail(res, 429, "otp_expired", "Too many incorrect attempts. Please request a new code.");
+    }
+    await redis.set(key, JSON.stringify(pending), { KEEPTTL: true });
+    return fail(
+      res,
+      400,
+      "invalid_otp",
+      `Incorrect code. ${OTP_MAX_ATTEMPTS - pending.attempts} attempts left.`
+    );
+  }
+
+  const user = await User.findById(pending.userId);
+  if (!user) {
+    await redis.del(key);
+    return fail(res, 400, "otp_expired", "Reset code expired. Please request a new one.");
+  }
+
+  await user.setPassword(newPassword);
+  await user.save();
+  await redis.del(key);
+  await redis.del(resetCooldownKey(normalizedEmail));
+
+  res.json({ ok: true, message: "Your password has been reset. Please log in." });
+}
+
+/* ------------------------------------------------------------------ */
+/* TOTP management (disable / regenerate backup codes)                 */
+/* ------------------------------------------------------------------ */
+
+/** Turns 2FA off. Step-up gated, so the factor is re-proved before removal. */
+async function totpDisable(req, res) {
+  const user = await User.findById(req.userId);
+  if (!user) return fail(res, 404, "not_found", "User not found.");
+  if (!user.totpEnabled) {
+    return fail(res, 400, "not_enrolled", "Two-factor authentication is not enabled.");
+  }
+
+  user.totpEnabled = false;
+  user.totpSecretEnc = null;
+  user.backupCodeHashes = [];
+  await user.save();
+  res.json({ user: user.toSafeJSON() });
+}
+
+/** Issues a fresh set of backup codes, invalidating the old ones. Step-up gated. */
+async function totpRegenerateBackupCodes(req, res) {
+  const user = await User.findById(req.userId);
+  if (!user) return fail(res, 404, "not_found", "User not found.");
+  if (!user.totpEnabled) {
+    return fail(res, 400, "not_enrolled", "Enable two-factor authentication first.");
+  }
+
+  const { codes, hashes } = generateBackupCodes();
+  user.backupCodeHashes = hashes;
+  await user.save();
+  // Shown exactly once — only hashes are kept server-side.
+  res.json({ backup_codes: codes });
 }
 
 export {
@@ -427,8 +602,14 @@ export {
   totpBackupVerify,
   totpEnrollBegin,
   totpEnrollConfirm,
+  totpDisable,
+  totpRegenerateBackupCodes,
   refresh,
   logout,
   reauth,
   me,
+  updateProfile,
+  changePassword,
+  requestPasswordReset,
+  resetPassword,
 };

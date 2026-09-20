@@ -12,6 +12,7 @@ function buildDefaultPortfolio(name = "Your Name") {
     theme: {
       accentColor: "#00E0F2",
       logoText: name.split(" ")[0] || "Portfolio",
+      pageTransition: "stairs",
     },
     home: {
       role: "Software Developer",
@@ -127,6 +128,13 @@ function buildDefaultPortfolio(name = "Your Name") {
       { platform: "github", url: "" },
       { platform: "linkedin", url: "" },
     ],
+    visibility: {
+      resume: true,
+      work: true,
+      achievements: true,
+      certificates: true,
+      contact: true,
+    },
   };
 }
 

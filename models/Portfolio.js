@@ -7,6 +7,11 @@ const themeSchema = new Schema(
   {
     accentColor: { type: String, default: "#00E0F2" },
     logoText: { type: String, default: "Portfolio" },
+    pageTransition: {
+      type: String,
+      enum: ["stairs", "curtains"],
+      default: "stairs",
+    },
   },
   sub
 );
@@ -106,6 +111,20 @@ const contactSchema = new Schema(
 
 const socialSchema = new Schema({ platform: String, url: String }, sub);
 
+// Per-page visibility on the public site. Keys mirror the public nav routes
+// (Projects is served at /work). A false value hides the page from the nav
+// and 404s its route on the public link; the owner's dashboard is unaffected.
+const visibilitySchema = new Schema(
+  {
+    resume: { type: Boolean, default: true },
+    work: { type: Boolean, default: true },
+    achievements: { type: Boolean, default: true },
+    certificates: { type: Boolean, default: true },
+    contact: { type: Boolean, default: true },
+  },
+  sub
+);
+
 const portfolioSchema = new Schema(
   {
     user: {
@@ -137,6 +156,7 @@ const portfolioSchema = new Schema(
     services: [serviceSchema],
     contact: contactSchema,
     socials: [socialSchema],
+    visibility: { type: visibilitySchema, default: () => ({}) },
   },
   { timestamps: true }
 );

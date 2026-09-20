@@ -23,22 +23,39 @@ function getTransport() {
   return _transport;
 }
 
+// Subject/heading/lead copy per code purpose. Defaults to the signup wording so
+// existing callers stay unchanged.
+const OTP_COPY = {
+  verify: {
+    subject: (otp, appName) => `${otp} is your ${appName} verification code`,
+    heading: "Verify your email",
+    lead: (appName) => `Use this code to finish creating your ${appName} account. It expires in 10 minutes.`,
+  },
+  reset: {
+    subject: (otp, appName) => `${otp} is your ${appName} password reset code`,
+    heading: "Reset your password",
+    lead: (appName) => `Use this code to reset your ${appName} password. It expires in 10 minutes.`,
+  },
+};
+
 /**
- * Emails the verification code. Outside production, a missing SMTP config or a
- * failed send falls back to printing the code on the server console so the
+ * Emails a one-time code. `purpose` selects the copy ("verify" for signup,
+ * "reset" for password recovery). Outside production, a missing SMTP config or
+ * a failed send falls back to printing the code on the server console so the
  * flow stays testable; in production failures propagate to the caller.
  */
-async function sendOtpEmail(to, otp) {
+async function sendOtpEmail(to, otp, purpose = "verify") {
   const appName = "Folionce";
+  const copy = OTP_COPY[purpose] || OTP_COPY.verify;
   const message = {
     from: process.env.SMTP_FROM || `${appName} <${process.env.SMTP_USER}>`,
     to,
-    subject: `${otp} is your ${appName} verification code`,
-    text: `Your ${appName} verification code is ${otp}. It expires in 10 minutes.\n\nIf you didn't request this, you can ignore this email.`,
+    subject: copy.subject(otp, appName),
+    text: `${copy.lead(appName)}\n\nYour code is ${otp}.\n\nIf you didn't request this, you can ignore this email.`,
     html: `
       <div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;padding:24px;color:#1c1c22">
-        <h2 style="margin:0 0 8px">Verify your email</h2>
-        <p style="margin:0 0 16px;color:#555">Use this code to finish creating your ${appName} account. It expires in 10 minutes.</p>
+        <h2 style="margin:0 0 8px">${copy.heading}</h2>
+        <p style="margin:0 0 16px;color:#555">${copy.lead(appName)}</p>
         <div style="font-size:32px;font-weight:bold;letter-spacing:8px;background:#f4f4f5;border-radius:8px;padding:16px;text-align:center">${otp}</div>
         <p style="margin:16px 0 0;color:#888;font-size:12px">If you didn't request this, you can ignore this email.</p>
       </div>`,

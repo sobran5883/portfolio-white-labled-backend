@@ -1,4 +1,5 @@
 import Portfolio from "../models/Portfolio.js";
+import User from "../models/User.js";
 import buildDefaultPortfolio from "../config/defaultPortfolio.js";
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])$/;
@@ -12,6 +13,7 @@ const RESERVED_SLUGS = new Set([
   "about",
   "_next",
   "public",
+  "preview",
 ]);
 
 // Top-level content sections a user is allowed to edit.
@@ -29,6 +31,7 @@ const EDITABLE_SECTIONS = [
   "services",
   "contact",
   "socials",
+  "visibility",
 ];
 
 async function getMyPortfolio(req, res) {
@@ -103,6 +106,18 @@ async function setPublished(req, res) {
 
   if (published && !portfolio.slug) {
     return res.status(400).json({ message: "Set a slug before publishing your portfolio." });
+  }
+
+  // Publishing is gated behind an active subscription. Unpublishing is always
+  // allowed (e.g. after a subscription lapses).
+  if (published) {
+    const user = await User.findById(req.userId);
+    if (!user || !user.hasActiveSubscription()) {
+      return res.status(402).json({
+        error: "subscription_required",
+        message: "An active subscription is required to publish your portfolio.",
+      });
+    }
   }
 
   portfolio.published = published;

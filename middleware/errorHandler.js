@@ -13,6 +13,14 @@ function errorHandler(err, req, res, next) {
     return res.status(400).json({ message: err.message });
   }
 
+  // Razorpay SDK rejects with a plain object ({ statusCode, error: { description } })
+  // that has no .message/.status, which would otherwise mask the real cause behind
+  // a generic 500. Surface Razorpay's own description and status code instead.
+  if (err && err.error && err.error.description) {
+    const status = err.statusCode || 502;
+    return res.status(status).json({ message: `Payment provider: ${err.error.description}` });
+  }
+
   const status = err.status || 500;
   res.status(status).json({ message: err.message || "Something went wrong." });
 }

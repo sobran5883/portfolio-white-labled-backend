@@ -27,6 +27,7 @@
     "nodemailer": "^9.0.3",
     "otplib": "^13.4.1",
     "qrcode": "^1.5.4",
+    "razorpay": "^2.9.6",
     "redis": "^6.1.0"
   },
   "devDependencies": {
